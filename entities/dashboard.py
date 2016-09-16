@@ -1,8 +1,9 @@
 import re
 from collections import defaultdict
+from toposort import toposort
 
 from schematics.models import Model
-from schematics.types import StringType
+from schematics.types import DecimalType, StringType
 from schematics.types.compound import ListType, ModelType
 
 
@@ -27,7 +28,7 @@ class PanelMapper():
         })
         panel.compiled_target = panel.compile_target()
         return panel
-    
+
 
 class ServiceMapper():
     @classmethod
@@ -62,24 +63,40 @@ class Panel(Model):
     targets = ListType(ModelType(Target))
     value_name = StringType()
     compiled_target = StringType()
+    value = DecimalType()
+
+    def _find_refs_in_target(self, target_value):
+        pattern = re.compile("(#[A-Z])")
+        return set(pattern.findall(target_value))
+
+    def _get_refs(self):
+        return {'#' + target.ref: target for target in self.targets}
+
+    def _topo_sort_targets(self):
+        refs = self._get_refs()
+
+        dependencies = defaultdic(set)
+        for ref, target in refs.iteritems():
+            target_value = target.value
+            found_refs = self._find_refs_in_target(target_value)
+            if found_refs:
+                dependencies[ref] = found_refs
+        return
 
     def compile_target(self):
         #  if just one, assume it's clean and return that
         if len(self.targets) == 1:
             return self.targets[0].value
 
-        refs = {'#' + target.ref: target for target in self.targets}
+        refs = self._get_refs()
 
         #  if multiple, assume they compile into a single one
         compiled_target = None
-        pattern = re.compile("(#[A-Z])")
 
         for ref, target in refs.iteritems():
+            target_value = refs[ref]
             target_value = target.value
-            found_refs = set(pattern.findall(target_value))
-
-            if not found_refs:
-                continue
+            found_refs = self._find_refs_in_target(target_value)
 
             for found_ref in found_refs:
                 target_value = re.sub(found_ref, refs[found_ref].value, target_value)
