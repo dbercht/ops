@@ -1,119 +1,89 @@
-import re
-from collections import defaultdict
-from toposort import toposort
-
 from schematics.models import Model
-from schematics.types import DecimalType, StringType
-from schematics.types.compound import ListType, ModelType
+from schematics.types import BooleanType, DecimalType, StringType
+from schematics.types.compound import DictType, ListType, ModelType
 
-
-class TargetMapper():
-    @classmethod
-    def to_entity(cls, target):
-        return Target({
-            'ref': target['refId'],
-            'value': target['target'],
-        })
-
-
-class PanelMapper():
-    @classmethod
-    def to_entity(cls, panel):
-        panel = Panel({
-            'title': panel['title'],
-            'value_name': panel['valueName'],
-            'targets': [
-                TargetMapper.to_entity(target) for target in panel['targets']
-            ],
-        })
-        panel.compiled_target = panel.compile_target()
-        return panel
+from .panel import Panel, PanelMapper
 
 
 class ServiceMapper():
     @classmethod
-    def to_entity(cls, service):
+    def to_entity(cls, service, variables):
         return Service({
             'title': service['title'],
             'panels': [
-                PanelMapper.to_entity(panel) for panel in service['panels']
+                PanelMapper.to_entity(panel, variables)
+                for panel in service['panels']
             ]
         })
+
 
 class DashboardMapper():
     @classmethod
-    def to_entity(cls, response):
+    def to_entity(
+        cls,
+        response,
+        variables,
+        from_delta,
+        until_delta=None,
+        period=None,
+    ):
         dashboard = response['dashboard']
+        required_variables = [
+            v['name'] for v in dashboard['templating']['list']
+        ]
+        cls._validate_variables(required_variables, variables)
         return Dashboard({
             'title': response['dashboard']['title'],
+            'variables': variables,
             'services': [
-                ServiceMapper.to_entity(service)
+                ServiceMapper.to_entity(service, variables=variables)
                 for service in dashboard['rows']
-            ]
+            ],
+            'from_': GraphiteTime({
+                'delta': from_delta,
+                'period': period
+            }),
+            'until_': GraphiteTime({
+                'now': True if not until_delta else False,
+                'delta': until_delta,
+                'period': period
+            })
         })
 
+    @classmethod
+    def _validate_variables(cls, required_variables, variables):
+        missing_vars = set(required_variables) - set(variables.keys())
+        if missing_vars:
+            raise Exception(
+                'Missing variables: {}'.format(', '.join(list(missing_vars)))
+            )
+        return variables
 
-class Target(Model):
-    ref = StringType()
-    value = StringType()
-
-
-class Panel(Model):
-    title = StringType()
-    targets = ListType(ModelType(Target))
-    value_name = StringType()
-    compiled_target = StringType()
-    value = DecimalType()
-
-    def _find_refs_in_target(self, target_value):
-        pattern = re.compile("(#[A-Z])")
-        return set(pattern.findall(target_value))
-
-    def _get_refs(self):
-        return {'#' + target.ref: target for target in self.targets}
-
-    def _topo_sort_targets(self):
-        refs = self._get_refs()
-
-        dependencies = defaultdic(set)
-        for ref, target in refs.iteritems():
-            target_value = target.value
-            found_refs = self._find_refs_in_target(target_value)
-            if found_refs:
-                dependencies[ref] = found_refs
-        return
-
-    def compile_target(self):
-        #  if just one, assume it's clean and return that
-        if len(self.targets) == 1:
-            return self.targets[0].value
-
-        refs = self._get_refs()
-
-        #  if multiple, assume they compile into a single one
-        compiled_target = None
-
-        for ref, target in refs.iteritems():
-            target_value = refs[ref]
-            target_value = target.value
-            found_refs = self._find_refs_in_target(target_value)
-
-            for found_ref in found_refs:
-                target_value = re.sub(found_ref, refs[found_ref].value, target_value)
-
-            target.value = target_value
-            break
-        else:
-            raise RuntimeError()
-
-        #  Replace granularity to 5min
-        return target.value.replace('$granularity', '5min')
 
 class Service(Model):
     title = StringType()
     panels = ListType(ModelType(Panel))
 
 
+class GraphiteTime(Model):
+    now = BooleanType()
+    delta = DecimalType()
+    period = StringType()
+
+    def get_time(self):
+        if self.now:
+            return 'now'
+        return '{}{}'.format(self.delta, self.period)
+
 class Dashboard(Model):
     title = StringType()
     services = ListType(ModelType(Service))
+    variables = DictType(StringType)
+    from_ = ModelType(GraphiteTime)
+    until_ = ModelType(GraphiteTime)
+
+    def until_time(self):
+        return self.until_.get_time()
+
+    def from_time(self):
+        return self.from_.get_time()
